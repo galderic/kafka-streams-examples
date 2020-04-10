@@ -15,6 +15,7 @@
  */
 package io.confluent.examples.streams;
 
+import io.confluent.examples.streams.utils.KeyValueWithTimestamp;
 import org.apache.kafka.common.serialization.Serdes;
 import org.apache.kafka.common.serialization.StringDeserializer;
 import org.apache.kafka.common.serialization.StringSerializer;
@@ -32,6 +33,7 @@ import org.junit.Test;
 
 import java.time.Duration;
 import java.util.Arrays;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Properties;
 
@@ -52,26 +54,26 @@ public class StreamToStreamJoinIntegrationTest {
   @Test
   public void shouldJoinTwoStreams() {
     // Input 1: Ad impressions
-    final List<KeyValue<String, String>> inputAdImpressions = Arrays.asList(
-      new KeyValue<>("car-advertisement", "shown"),
-      new KeyValue<>("newspaper-advertisement", "shown"),
-      new KeyValue<>("gadget-advertisement", "shown")
+    final List<KeyValueWithTimestamp<String, String>> inputAdImpressions = Arrays.asList(
+            new KeyValueWithTimestamp<>("car-advertisement", "shown",1586477172000L),
+            new KeyValueWithTimestamp<>("newspaper-advertisement", "shown",1586477172000L),
+            new KeyValueWithTimestamp<>("gadget-advertisement", "shown",1586477172000L)
     );
 
     // Input 2: Ad clicks
-    final List<KeyValue<String, String>> inputAdClicks = Arrays.asList(
-      new KeyValue<>("newspaper-advertisement", "clicked"),
-      new KeyValue<>("gadget-advertisement", "clicked"),
-      new KeyValue<>("newspaper-advertisement", "clicked")
+    final List<KeyValueWithTimestamp<String, String>> inputAdClicks = Arrays.asList(
+            new KeyValueWithTimestamp<>("newspaper-advertisement", "clicked",1586477172000L),
+            new KeyValueWithTimestamp<>("gadget-advertisement", "clicked",1586477172000L),
+            new KeyValueWithTimestamp<>("newspaper-advertisement", "clicked",1586477172000L)
     );
 
-    final List<KeyValue<String, String>> expectedResults = Arrays.asList(
-      new KeyValue<>("car-advertisement", "shown/not-clicked-yet"),
-      new KeyValue<>("newspaper-advertisement", "shown/not-clicked-yet"),
-      new KeyValue<>("gadget-advertisement", "shown/not-clicked-yet"),
-      new KeyValue<>("newspaper-advertisement", "shown/clicked"),
-      new KeyValue<>("gadget-advertisement", "shown/clicked"),
-      new KeyValue<>("newspaper-advertisement", "shown/clicked")
+    final List<KeyValueWithTimestamp<String, String>> expectedResults = Arrays.asList(
+            new KeyValueWithTimestamp<>("car-advertisement", "shown/not-clicked-yet"),
+            new KeyValueWithTimestamp<>("newspaper-advertisement", "shown/not-clicked-yet"),
+            new KeyValueWithTimestamp<>("gadget-advertisement", "shown/not-clicked-yet"),
+            new KeyValueWithTimestamp<>("newspaper-advertisement", "shown/clicked"),
+            new KeyValueWithTimestamp<>("gadget-advertisement", "shown/clicked"),
+            new KeyValueWithTimestamp<>("newspaper-advertisement", "shown/clicked")
     );
 
     //
@@ -84,6 +86,7 @@ public class StreamToStreamJoinIntegrationTest {
     streamsConfiguration.put(StreamsConfig.DEFAULT_VALUE_SERDE_CLASS_CONFIG, Serdes.String().getClass().getName());
     // Use a temporary directory for storing state, which will be automatically removed after the test.
     streamsConfiguration.put(StreamsConfig.STATE_DIR_CONFIG, TestUtils.tempDirectory().getAbsolutePath());
+    streamsConfiguration.put(StreamsConfig.DEFAULT_TIMESTAMP_EXTRACTOR_CLASS_CONFIG,"org.apache.kafka.streams.processor.FailOnInvalidTimestamp");
 
     final StreamsBuilder builder = new StreamsBuilder();
     final KStream<String, String> alerts = builder.stream(adImpressionsTopic);
@@ -94,19 +97,19 @@ public class StreamToStreamJoinIntegrationTest {
     // for the same join key (e.g. "newspaper-advertisement"), we receive an update from either of
     // the two joined streams during the defined join window.
     final KStream<String, String> impressionsAndClicks = alerts.outerJoin(
-      incidents,
-      (impressionValue, clickValue) ->
-        (clickValue == null)? impressionValue + "/not-clicked-yet": impressionValue + "/" + clickValue,
-      // KStream-KStream joins are always windowed joins, hence we must provide a join window.
-      JoinWindows.of(Duration.ofSeconds(5)),
-      // In this specific example, we don't need to define join serdes explicitly because the key, left value, and
-      // right value are all of type String, which matches our default serdes configured for the application.  However,
-      // we want to showcase the use of `StreamJoined.with(...)` in case your code needs a different type setup.
-      StreamJoined.with(
-        Serdes.String(), /* key */
-        Serdes.String(), /* left value */
-        Serdes.String()  /* right value */
-      )
+            incidents,
+            (impressionValue, clickValue) ->
+                    (clickValue == null)? impressionValue + "/not-clicked-yet": impressionValue + "/" + clickValue,
+            // KStream-KStream joins are always windowed joins, hence we must provide a join window.
+            JoinWindows.of(Duration.ofSeconds(5)),
+            // In this specific example, we don't need to define join serdes explicitly because the key, left value, and
+            // right value are all of type String, which matches our default serdes configured for the application.  However,
+            // we want to showcase the use of `StreamJoined.with(...)` in case your code needs a different type setup.
+            StreamJoined.with(
+                    Serdes.String(), /* key */
+                    Serdes.String(), /* left value */
+                    Serdes.String()  /* right value */
+            )
     );
 
     // Write the results to the output topic.
@@ -117,21 +120,36 @@ public class StreamToStreamJoinIntegrationTest {
       // Step 2: Setup input and output topics.
       //
       final TestInputTopic<String, String> impressionInput = topologyTestDriver
-        .createInputTopic(adImpressionsTopic,
-                          new StringSerializer(),
-                          new StringSerializer());
+              .createInputTopic(adImpressionsTopic,
+                      new StringSerializer(),
+                      new StringSerializer());
       final TestInputTopic<String, String> clickInput = topologyTestDriver
-        .createInputTopic(adClicksTopic,
-                          new StringSerializer(),
-                          new StringSerializer());
+              .createInputTopic(adClicksTopic,
+                      new StringSerializer(),
+                      new StringSerializer());
       final TestOutputTopic<String, String> output = topologyTestDriver
-        .createOutputTopic(outputTopic, new StringDeserializer(), new StringDeserializer());
+              .createOutputTopic(outputTopic, new StringDeserializer(), new StringDeserializer());
 
       //
       // Step 3: Publish input data.
       //
-      impressionInput.pipeKeyValueList(inputAdImpressions);
-      clickInput.pipeKeyValueList(inputAdClicks);
+
+      Iterator impressionIterator = inputAdImpressions.iterator();
+
+      while(impressionIterator.hasNext()) {
+        KeyValueWithTimestamp<String, String> keyValueTs = (KeyValueWithTimestamp<String, String>) impressionIterator.next();
+        impressionInput.pipeInput(keyValueTs.key, keyValueTs.value,keyValueTs.timestamp);
+      }
+
+      Iterator inputAdClicksIterator = inputAdClicks.iterator();
+
+      while(inputAdClicksIterator.hasNext()) {
+        KeyValueWithTimestamp<String, String> keyValueTs = (KeyValueWithTimestamp<String, String>) inputAdClicksIterator.next();
+        clickInput.pipeInput(keyValueTs.key, keyValueTs.value,keyValueTs.timestamp);
+      }
+
+      //impressionInput.pipeKeyValueList(inputAdImpressions);
+      ///clickInput.pipeKeyValueList(inputAdClicks);
 
       //
       // Step 4: Verify the application's output data.
